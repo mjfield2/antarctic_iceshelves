@@ -1,0 +1,34 @@
+name: cryo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - ipython
+  - jupyterlab
+  - notebook
+  - ipywidgets
+  - numpy
+  - pandas
+  - geopandas
+  - shapely
+  - xarray
+  - xrft
+  - rioxarray
+  - scipy
+  - matplotlib
+  - scikit-learn
+  - scikit-gstat
+  - cmocean
+  - cmcrameri
+  - verde
+  - harmonica
+  - numba
+  - pyproj
+  - rioxarray
+  - tqdm
+  - gstools
+  - pypdf
+  - pip:
+      - gstatsim==1.1.3
+  
