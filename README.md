@@ -6,7 +6,7 @@ Authors: Michael Field, Emma (Mickey) MacKie, Lijing Wang, Atsuhiro Muto, Niya S
 
 The shape of the seafloor, or bathymetry, below ice shelves is a critical uncertainty in ice sheet models and the sea level rise that they predict. Sub-ice-shelf bathymetry is hard to measure, and the best way to do it on large spatial scales is with airborne gravity measurements. Previous gravity inversions of sub-ice-shelf bathymetry have been deterministic, meaning they produce a single output that is the same all the time, and have not robustly quantified the uncertainty of the bathymetry due to different sources. The goal of this work is to create a stochastic inversion process that produces different realizations of sub-ice-shelf bathymetry. The ensemble of realizations are then used to measure the uncertainty of the bathymetry. The driver of the uncertainty is the interpolation of the Bouguer disturbance, which represents crustal density variations and crustal thickness. Previous inverions have deterministically interpolated the Bouger disturbance, leading to a single deterministic inversions. Instead, we use Sequential Gaussian Simulation (SGS) to stochastically interpolate the Bouguer disturbance. We produced bathymetry ensembles for 9 ice shelves/regions around Antarctica: Abbot, George VI, Getz, Larsen, Queen Maud Land east, Queen Maud Land west, Salzberger, Shackleton, and Totten and Moscow University. 
 
-<img src="./figures/inversion_domains.png" width="400"/>
+<img src="./figures/png/inversion_domains.png" width="400"/>
 
 ### Environment
 
