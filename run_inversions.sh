@@ -9,3 +9,5 @@ python iceshelves/maudwest/maudwest_inversions.py -n 100 -f
 python iceshelves/salzberger/salz_inversions.py -n 100
 python iceshelves/shackleton/shack_inversions.py -n 100
 python iceshelves/totten/totten_inversions.py -n 100
+python iceshelves/pineisland/pig_inversions.py -n 100
+python iceshelves/pineisland/pig_inversions_new.py -n 100
