@@ -6,6 +6,7 @@ import harmonica as hm
 import xarray as xr
 import time
 import verde as vd
+from numba import njit, prange
 
 from prisms import *
 
@@ -15,11 +16,23 @@ def sum_sq_err(data, pred):
     """
     return np.sum(np.square(data-pred))
 
+def sum_sq_err_unc(data, pred, std):
+    """
+    Sum of squared error with variable observational uncertainties
+    """
+    return np.sum(np.square(data-pred)/np.square(std))
+
 def mse(data, pred):
     """
     Mean squared error
     """
     return np.mean(np.square(data-pred))
+
+def rmse(data, pred):
+    """
+    Root mean squared error
+    """
+    return np.sqrt(np.mean(np.square(data-pred)))
 
 def block_update_sample(field, inv_msk, bsize, sample, rng, weights=None):
     """
@@ -215,7 +228,12 @@ def mcmc_block(ds, x0, pred_coords, target, sigma, density_dict, Sigma, bsize, v
     # initialize loss
     prisms, densities = make_prisms(ds, bed, density_dict)
     g_z = hm.prism_gravity(pred_coords, prisms, densities, field='g_z', parallel=parallel)
-    loss_prev = sum_sq_err(te_dist, g_z)
+
+    # compute loss
+    if isinstance(sigma, np.ndarray):
+        loss_prev = sum_sq_err_unc(te_dist, g_z, sigma)
+    else:
+        loss_prev = sum_sq_err(te_dist, g_z)
     
     pbar = tqdm(range(iter_num), position=0, leave=True, disable=quiet)
     for i in pbar:
@@ -257,12 +275,19 @@ def mcmc_block(ds, x0, pred_coords, target, sigma, density_dict, Sigma, bsize, v
 
         # keep track of total gravity
         g_z_next = g_z + g_z_change
-        
-        # compute loss
-        loss_next = sum_sq_err(te_dist, g_z_next)
-        
-        # metrpolis acceptance
-        alpha = min(1,np.exp((loss_prev-loss_next)/(2*sigma**2)))
+
+        # compute loss with variable measurement uncertainty
+        if isinstance(sigma, np.ndarray):
+            loss_next = sum_sq_err_unc(te_dist, g_z_next, sigma)
+
+            # metrpolis acceptance
+            alpha = min(1, np.exp(0.5*(loss_prev-loss_next)))
+        # compute loss with constant measurement uncertainty
+        else:
+            loss_next = sum_sq_err(te_dist, g_z_next)
+            
+            # metrpolis acceptance
+            alpha = min(1,np.exp((loss_prev-loss_next)/(2*sigma**2)))
         
         # accept or not, save cachestep
         u = rng.uniform(size = 1)
@@ -279,14 +304,19 @@ def mcmc_block(ds, x0, pred_coords, target, sigma, density_dict, Sigma, bsize, v
         bed_cache[i,:,:] = bed
         grav_cache[i,:] = g_z
 
-        if stop is not None and np.sqrt(loss_prev/target.size)<stop:
+        if isinstance(sigma, np.ndarray):
+            rmse_i = rmse(te_dist, g_z_next)
+        else:
+            rmse_i = np.sqrt(loss_prev/target.size)
+
+        if stop is not None and rmse_i<stop:
             bed_cache = bed_cache[:i+1,...]
             loss_cache = loss_cache[:i+1]
             step_cache = step_cache[:i+1]
             grav_cache = grav_cache[:i+1,:]
             break
                 
-        pbar.set_description(f'#{num_mp} RMSE: {np.sqrt(loss_cache[i]/target.size):.3f}')
+        pbar.set_description(f'#{num_mp} RMSE: {rmse_i:.3f}')
         
     result = {
         'bed_cache' : bed_cache,
@@ -455,6 +485,7 @@ def min_dist(ds, metric='l2'):
     min_dist = np.nanmin(np.where(dist_to_cond==0, np.nan, dist_to_cond), axis=1)
     return min_dist.reshape(ds.bed.shape)
 
+@njit(parallel=True)
 def min_dist_simple(hard_mat, xx, yy):
     """
     Compute minimum distance from conditioning data.
@@ -469,7 +500,7 @@ def min_dist_simple(hard_mat, xx, yy):
     xx_hard = np.where(hard_mat==False, np.nan, xx)
     yy_hard = np.where(hard_mat==False, np.nan, yy)
     
-    for i in range(xx.shape[0]):
+    for i in prange(xx.shape[0]):
         for j in range(xx.shape[1]):
             dist[i,j] = np.nanmin(np.sqrt(np.square(yy[i,j]-yy_hard)+np.square(xx[i,j]-xx_hard)))
     return dist

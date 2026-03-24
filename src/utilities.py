@@ -6,41 +6,105 @@ import verde as vd
 import cmocean
 from pyproj import Transformer
 from matplotlib.colors import ListedColormap
+from tqdm.auto import tqdm
+from scipy.spatial import KDTree
 
-def xy_into_grid(ds, coords, values, fill=np.nan, ydim=0, xdim=1):
+# def xy_into_grid(ds, coords, values, fill=np.nan, ydim=0, xdim=1):
+#     """
+#     Place tabular data that is colocated with grid coordinates inside of grid.
+
+#     Args:
+#         ds : xarray.Dataset with grid coordinates
+#         coords : tuple of tabular coordinates, e.g., (x, y)
+#         values : tuple of values correspondin to coords, e.g., (var1, var2)
+#         fill : value to fill in grid where there are no values
+#         ydim : int corresponding to axis representing y-dimension in grid
+#         xdim : int corresponding to axis representing x-dimension in grid
+#     Outputs:
+#         if multiple arrays in values, returns a tuple of gridded values, 
+#         otherwise returns single gridded array
+#     """
+#     yname = list(ds.dims)[ydim]
+#     xname = list(ds.dims)[xdim]
+#     shape = (ds[yname].size, ds[xname].size)
+    
+#     values = np.array(values)
+#     if len(values.shape)==1:
+#         values = np.expand_dims(values, axis=0)
+        
+#     arr = np.full((len(values), *shape), fill)
+    
+#     for i in range(shape[0]):
+#         for j in range(shape[1]):
+#             idx = (coords[0]==ds[xname].values[j]) & (coords[1]==ds[yname].values[i])
+#             if np.count_nonzero(idx)>0:
+#                 arr[:,i,j] = values[:,idx].squeeze()
+#     if arr.shape[0]>1:
+#         return tuple(arr)
+#     else:
+#         return arr.squeeze()
+
+def xy_into_grid(gridx, gridy, coords, values, fill=np.nan, quiet=True):
     """
     Place tabular data that is colocated with grid coordinates inside of grid.
 
     Args:
-        ds : xarray.Dataset with grid coordinates
+        gridx : x-coordinates of grid
+        gridy : y-coordinates of grid
         coords : tuple of tabular coordinates, e.g., (x, y)
         values : tuple of values correspondin to coords, e.g., (var1, var2)
         fill : value to fill in grid where there are no values
-        ydim : int corresponding to axis representing y-dimension in grid
-        xdim : int corresponding to axis representing x-dimension in grid
+        quiet : show progress bar if False
     Outputs:
         if multiple arrays in values, returns a tuple of gridded values, 
         otherwise returns single gridded array
     """
-    yname = list(ds.dims)[ydim]
-    xname = list(ds.dims)[xdim]
-    shape = (ds[yname].size, ds[xname].size)
+    if gridx[0] > gridx[1]:
+        gridx = np.sort(gridx)
+        reversex = True
+    else:
+        reversex = False
+    if gridy[0] > gridy[1]:
+        gridy = np.sort(gridy)
+        reversey = True
+    else:
+        reversey = False
     
     values = np.array(values)
     if len(values.shape)==1:
         values = np.expand_dims(values, axis=0)
         
-    arr = np.full((len(values), *shape), fill)
+    arr = np.full((len(values), len(gridy), len(gridx)), fill)
     
-    for i in range(shape[0]):
-        for j in range(shape[1]):
-            idx = (coords[0]==ds[xname].values[j]) & (coords[1]==ds[yname].values[i])
-            if np.count_nonzero(idx)>0:
-                arr[:,i,j] = values[:,idx].squeeze()
+    for i in tqdm(range(len(coords[0])), disable=quiet):
+        xi = coords[0][i]
+        yi = coords[1][i]
+        xind = np.searchsorted(gridx, xi)
+        yind = np.searchsorted(gridy, yi)
+        if (xind < len(gridx)) & (yind < len(gridy)):
+            if (gridx[xind] == xi) & (gridy[yind] == yi):
+                if reversex == True:
+                    xind = len(gridx) - xind - 1
+                if reversey == True:
+                    yind = len(gridy) - yind - 1
+                arr[:,yind, xind] = values[:,i].squeeze()
     if arr.shape[0]>1:
         return tuple(arr)
     else:
         return arr.squeeze()
+
+def min_dist_from_mask(xx, yy, mask):
+    tree = KDTree(np.array([xx[mask], yy[mask]]).T)
+    distance = tree.query(np.array([xx.ravel(), yy.ravel()]).T)[0].reshape(xx.shape)
+    return distance
+
+def spline_interp_msk(points, values, xx, yy, mask, damping):
+    sp = vd.Spline(damping=damping)
+    sp.fit((points[:,0], points[:,1]), values)
+    preds = sp.predict((xx[mask], yy[mask]))
+    grid = np.full(xx.shape, np.nan)
+    np.place(grid, mask, preds)
+    return grid
 
 def rescale(m, a, b):
     return (m-np.min(m))/(np.max(m)-np.min(m))*(b-a)+a

@@ -42,6 +42,16 @@ def bm_terrain_effect(ds, grav, rock_density=2670):
 
     return g_z
 
+def bouguer_lower_bound(ds, grav, trend, density_dict):
+    bed_max = np.where(ds.mask==3, (ds.surface-ds.thickness).values, ds.bed.values)
+    pred_coords = (grav.x, grav.y, grav.height)
+    prisms, densities = make_prisms(ds, bed_max, density_dict)
+    g_z_max = hm.prism_gravity(pred_coords, prisms, densities, field='g_z')
+    boug_max = grav.faa - g_z_max
+    boug_max_grid = xy_into_grid(ds.x.values, ds.y.values, (pred_coords[0], pred_coords[1]), boug_max)
+    min_bound = boug_max_grid - trend
+    return min_bound, boug_max_grid
+
 def variograms(grav, data, bin_func='even', maxlag=100e3, n_lags=70, covmodels=['gaussian', 'spherical', 'exponential']):
     """
     Make experimental variogram and fit covariance models.
@@ -159,8 +169,7 @@ def filter_boug(ds, grav, target, cutoff=10e3, pad=0):
     """
     xx, yy = np.meshgrid(ds.x, ds.y)
 
-    target_grid = xy_into_grid(ds, (grav.x.values, grav.y.values), target)
-    faa_grid = xy_into_grid(ds, (grav.x, grav.y), grav.faa)
+    target_grid, faa_grid = xy_into_grid(ds.x.values, ds.y.values, (grav.x.values, grav.y.values), (target, grav.faa.values))
     boug_grid = faa_grid - target_grid
     
     grav_msk = ~np.isnan(boug_grid)
@@ -389,7 +398,7 @@ def boug_resample(ds, grav, boug, trend, cond_msk, k, vario, rad, rng, density_d
     prisms, densities = make_prisms(ds, bed_max, density_dict)
     g_z_max = hm.prism_gravity(pred_coords, prisms, densities, field='g_z')
     boug_max = grav_mskd.faa - g_z_max
-    boug_max_grid = xy_into_grid(ds, (pred_coords[0], pred_coords[1]), boug_max)
+    boug_max_grid = xy_into_grid(ds.x.values, ds.y.values, (pred_coords[0], pred_coords[1]), boug_max)
 
     #grav_cond_msk = ~np.isnan(xy_into_grid(ds, (grav_cond.x, grav_cond.y), grav_cond.faa))
     

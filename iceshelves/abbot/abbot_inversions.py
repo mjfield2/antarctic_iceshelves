@@ -80,8 +80,25 @@ vario = {
     'smoothness' : parameters[2]
 }
 
+bed_max = np.where(ds.mask==3, (ds.surface-ds.thickness).values, ds.bed.values)
+
+density_dict = {
+    'ice' : 917,
+    'water' : 1027,
+    'rock' : 2670
+}
+pred_coords = (grav.x, grav.y, grav.height)
+
+prisms, densities = make_prisms(ds, bed_max, density_dict)
+g_z_max = hm.prism_gravity(pred_coords, prisms, densities, field='g_z')
+boug_max = grav.faa - g_z_max
+boug_max_grid = xy_into_grid(ds, (pred_coords[0], pred_coords[1]), boug_max)
+min_bound = boug_max_grid - trend
+
+bounds = (min_bound, 100)
+
 # number of neighbors and max radius
-k = 50
+k = 48
 rad = 500_000
 
 # random number generator
@@ -107,45 +124,46 @@ pred_coords = (grav_mskd.x.values, grav_mskd.y.values, grav_mskd.height.values)
 # block size, range, amplitude, iterations
 sequence = [
     [21, 10, 60, 1000],
-    [15, 8, 40, 1000],
-    [9, 6, 40, 5000],
-    [5, 5, 40, 10000]
+    [15, 8, 80, 1000],
+    [9, 6, 100, 5000],
+    [5, 5, 100, 10000]
 ]
 
 # gravity uncertainty
-sigma = 1.6
+sigma = ds.stdev.values[grav_mask][grav.inv_pad==True]
 
 # RMSE stopping condition
-stop = 2
+stop = 2.8
 
-# make base PRNG
-root_seed = 328613813390984468677358742156199349641
-base_seq = SeedSequence()
-rng = np.random.default_rng(base_seq)
+# load seeds
+with open(Path('../../200_seeds.txt'), 'r') as f:
+    lines = f.readlines()
+
+seeds = []
+for line in lines:
+    seeds.append(int(line.strip()))
 
 n_invs = args.ninvs
 
-target_cache_nodens = np.zeros((n_invs, grav.shape[0]))
+target_cache = np.zeros((n_invs, grav.shape[0]))
 
 print(f'running {n_invs} inversions of Abbot')
 
 for i in tqdm(range(n_invs)):
-    rng_i = np.random.default_rng([i, root_seed])
+    rng_i = np.random.default_rng(seeds[i])
 
     # bouguer SGS interpolation
     sim = sgs(xx, yy, res_grid_mod, vario, rad, k, sim_mask=ds.inv_msk.values, quiet=True, seed=rng_i)
+    sim = np.where(ds.inv_msk==False, residual_grid, sim)
 
-    # resample portions that want ice bed above ice shelf bottom
-    final_boug = boug_resample(ds, grav, sim, trend, cond_msk, k, vario, rad, rng, density_dict, max_iter_no_change=100, verbose=False)
-    final_boug = np.where(ds.inv_msk==False, residual_grid, final_boug)
-    target = grav.faa - (final_boug + trend)[grav_mask]
+    target = grav.faa - (sim + trend)[grav_mask]
 
     if args.filt == True:
         boug_filt = filter_boug(ds, grav, target, cutoff=12e3, pad=0)
         target = grav.faa.values - boug_filt
 
     # save target
-    target_cache_nodens[i,:] = target
+    target_cache[i,:] = target
     
     # trim to mask
     target = target[grav.inv_pad==True]
@@ -160,7 +178,7 @@ for i in tqdm(range(n_invs)):
     result = chain_sequence(sequence, ds, x0, pred_coords, target, sigma, density_dict, rng_i, 
                             weights=None, stop=stop, save=path, full_cache=False, quiet=True, num_mp=i+1)
 
-np.save(dir_path/'results/bouguer_cache.npy', target_cache_nodens)
+np.save(dir_path/'results/target_cache.npy', target_cache_nodens)
 
 ### Upscale beds to 500 m resolution
 grid = xr.open_dataset(Path('G:/stochastic_bathymetry/raw_data/bedmachine/BedMachineAntarctica-v3.nc'))

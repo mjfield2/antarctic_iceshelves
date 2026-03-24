@@ -192,18 +192,19 @@ def bedmap3_grid(path, region, res=2000):
     # make mask grounded ice where bed was above ice bottom
     ds['mask'] = (('y', 'x'), np.where(bed_above_ice_bottom, 2, ds.mask))
     
-    # reference elevations to WGS84
+    # reference elevations to WGS84 ellipsoid
     ds['bed'] += ds['geoid']
     ds['surface'] += ds['geoid']
     
     return ds
 
-def antgg_grid_from_bm(path, grid, max_height=1500):
-    ds = xr.open_dataset(path)
+def antgg_grid_from_bm(grid, max_height=1500):
+    ds = xr.open_dataset(Path('../../raw_data/antgg.nc'))
     x = ds.x.values
-    y = ds.y.values[::-1]
-    h_ell = ds.h_ell.values[::-1,:]
-    grav_dist = ds.grav_dist.values[::-1,:]
+    y = ds.y.values
+    h_ell = ds.ell_surf_height.values
+    grav_dist = ds.grav_dist.values
+    stdev = ds.stdev.values
 
     xmin = np.min(grid.x.values)
     xmax = np.max(grid.x.values)
@@ -221,11 +222,21 @@ def antgg_grid_from_bm(path, grid, max_height=1500):
 
     grav_dist = grav_dist[np.ix_(y_mask, x_mask)]
     h_ell = h_ell[np.ix_(y_mask, x_mask)]
+    stdev = stdev[np.ix_(y_mask, x_mask)]
     y = y[y_mask]
     x = x[x_mask]
 
+    # interpolate grav dist onto BedMachine grid
     interp = interpolate.RegularGridInterpolator((y, x), grav_dist)
     surface_preds = interp((yy, xx))
+
+    # interpolate surface ellipsoid height onto BedMachine grid
+    interp = interpolate.RegularGridInterpolator((y, x), h_ell)
+    h_ell_preds = interp((yy, xx))
+
+    # interpolate stdev onto BedMachine grid
+    interp = interpolate.RegularGridInterpolator((y, x), stdev)
+    stdev_preds = interp((yy, xx))
 
     dampings = [1, 10, 100, 1000]
     depths = [1e3, 3e3, 4e3, 5e3]
@@ -237,10 +248,10 @@ def antgg_grid_from_bm(path, grid, max_height=1500):
     equivalent_sources = hm.EquivalentSourcesGB(window_size=20e3)
     
     # Use downsampled data since so dense
-   #  coordinates = (grav.x[::10], grav.y[::10], grav.height[::10])
+    # coordinates = (grav.x[::10], grav.y[::10], grav.height[::10])
 
     xx_grav, yy_grav = np.meshgrid(x, y)
-    pred_coords = (xx, yy, np.full(xx.shape, max_height))
+    pred_coords = (xx, yy, np.full_like(xx, max_height))
     coordinates = (xx_grav, yy_grav, h_ell)
     
     scores = []
@@ -258,13 +269,11 @@ def antgg_grid_from_bm(path, grid, max_height=1500):
     print("Best score:", scores[best])
     print("Best parameters:", parameter_sets[best])
 
-    
-
     equivalent_sources = hm.EquivalentSourcesGB(**parameter_sets[best], window_size=20e3)
     equivalent_sources.fit(coordinates, grav_dist)
-    leveled = equivalent_sources.predict(pred_coords).reshape(xx.shape)
+    grav_upward = equivalent_sources.predict(pred_coords).reshape(xx.shape)
 
-    return surface_preds, leveled
+    return surface_preds, grav_upward, stdev_preds
 
 def bedmachine_plots(bm, figsize=(12,4), vmax=2000):
     fig, axs = plt.subplots(1, 3, figsize=figsize, sharey=True)
@@ -292,8 +301,8 @@ def bedmachine_plots(bm, figsize=(12,4), vmax=2000):
     
     plt.show()
 
-def plot_gravity(bm, surface, upcon, max_height, figsize, vmax):
-    fig, axs = plt.subplots(1, 2, figsize=figsize, sharey=True)
+def plot_gravity(bm, surface, upcon, stdev, max_height, figsize, vmax):
+    fig, axs = plt.subplots(1, 3, figsize=figsize, sharey=True)
     ax = axs[0]
     im = ax.pcolormesh(bm.x/1000, bm.y/1000, surface, cmap=cm.vik, vmin=-vmax, vmax=vmax)
     ax.axis('scaled')
@@ -308,6 +317,13 @@ def plot_gravity(bm, surface, upcon, max_height, figsize, vmax):
     im = ax.pcolormesh(bm.x/1000, bm.y/1000, upcon_masked, cmap=cm.vik, vmin=-vmax, vmax=vmax)
     ax.axis('scaled')
     ax.set_title('Upward continued')
+    ax.set_xlabel('X [km]')
+    plt.colorbar(im, ax=ax, pad=0.03, aspect=40)
+
+    ax = axs[2]
+    im = ax.pcolormesh(bm.x/1000, bm.y/1000, stdev, cmap='plasma')
+    ax.axis('scaled')
+    ax.set_title('Standard Deviation')
     ax.set_xlabel('X [km]')
     plt.colorbar(im, ax=ax, pad=0.03, aspect=40)
     plt.show()

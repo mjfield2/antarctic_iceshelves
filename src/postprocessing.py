@@ -1,15 +1,135 @@
 import numpy as np
 import xarray as xr
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, RegularGridInterpolator
 from tqdm.auto import tqdm
 from pathlib import Path
 import verde as vd
 import os
 from utilities import lowpass_filter_invpad
+from skgstat import models
+from scipy.spatial import KDTree
+from skimage.measure import label
+import multiprocessing as mp
+
+from utilities import min_dist_from_mask
 
 """
 Run this script to load inversions, upscale them, and save upscaled beds.
 """
+
+def get_beds(path):
+    beds = []
+    losses = []
+    
+    for entry in os.scandir(path):
+        if 'result' in entry.name and '._' not in entry.name:
+            result = np.load(entry.path, allow_pickle=True).item()
+            
+            bed = result['bed_cache']
+            if len(bed.shape)==3:
+                beds.append(bed[-1,...])
+            else:
+                beds.append(bed)
+            losses.append(result['loss_cache'])
+
+    beds = np.array(beds)
+    return beds, losses
+
+def upscale_beds(beds, ds, grid, weight_range=10e3, weight_fun='spherical'):
+    inv_msk = grid.mask.values==3
+    xx_bm, yy_bm = np.meshgrid(grid.x, grid.y)
+    distance = min_dist_from_mask(xx_bm, yy_bm, ~inv_msk)
+    var_model = {
+        'spherical' : models.spherical,
+        'gaussian' : models.gaussian,
+        'exponential' : models.exponential
+    }
+    weights = var_model[weight_fun](distance.ravel(), weight_range, 1, 0).reshape(xx_bm.shape)
+
+    pts_eval = np.array([yy_bm.ravel(), xx_bm.ravel()]).T
+
+    interp_beds = np.full((beds.shape[0], *xx_bm.shape), np.nan)
+
+    for i in tqdm(range(beds.shape[0])):
+        grid_interp = RegularGridInterpolator((ds.y.values, ds.x.values), beds[i,...], bounds_error=True, method='cubic')
+        interp = grid_interp(pts_eval).reshape(xx_bm.shape)
+        interp_beds[i,...] = (1-weights)*grid.bed.values + weights*interp
+
+    return interp_beds
+
+def hub_elevations(ds, bed, mask, min_bed, max_bed, vert_res=1, prior=None, save_connects=False, quiet=False):
+    ii, jj = np.meshgrid(np.arange(bed.shape[0]), np.arange(bed.shape[1]), indexing='ij')
+    amin = np.argmin(bed)
+    imin = ii.ravel()[amin]
+    jmin = jj.ravel()[amin]
+
+    hubs = np.full(ii.shape, np.nan)
+    last_connect = np.full(ii.shape, False)
+    elevations = np.arange(min_bed+vert_res, max_bed, vert_res)
+    if save_connects==True:
+        connects = np.full((elevations.size, *ii.shape), False)
+
+    for i, bed_i in enumerate(tqdm(elevations, disable=quiet)):
+        thresh = np.where(mask, bed < bed_i, False)
+        groups = label(thresh, connectivity=1)
+        connect = groups==groups[imin,jmin]
+        if prior is not None:
+            connect = connect | (prior < bed_i)
+        hubs[connect ^ last_connect] = bed_i
+        last_connect = connect
+
+        if save_connects==True:
+            connects[i,...] = connect
+
+    if save_connects==True:
+        return hubs, connects
+    else:
+        return hubs
+
+def get_ensembles(ds, beds, bm_path, filt=False, quiet=True):
+    grid = xr.open_dataset(bm_path)
+        
+    xx, yy = np.meshgrid(ds.x, ds.y)
+    
+    # trim original BedMachine, get coordinates
+    x_trim = (grid.x >= np.min(xx)) & (grid.x <= np.max(xx))
+    y_trim = (grid.y >= np.min(yy)) & (grid.y <= np.max(yy))
+    grid = grid.sel(x=x_trim, y=y_trim)
+    xx_bm, yy_bm = np.meshgrid(grid.x.values, grid.y.values)
+    
+    # interpolate inversion mask to original resolution
+    kn = vd.KNeighbors(1)
+    kn.fit((xx.flatten(), yy.flatten()), ds.inv_msk.values.flatten())
+    preds_msk = kn.predict((xx_bm, yy_bm))
+    preds_msk = preds_msk.reshape(xx_bm.shape) > 0.5
+
+    
+    beds_up = np.zeros((beds.shape[0], *grid.bed.shape))
+    if filt==True:
+        beds_filt = np.zeros((beds.shape[0], *ds.bed.values.shape))
+        beds_filt_up = np.zeros((beds.shape[0], *grid.bed.shape))
+
+    for i in tqdm(range(beds.shape[0]), disable=quiet):
+        beds_up_i = upscale_data(ds, grid, beds[i], grid.bed.values, preds_msk, ds.inv_msk.values)
+        beds_up[i,...] = np.where(beds_up_i > grid.surface-grid.thickness, grid.surface-grid.thickness, beds_up_i)
+
+        if filt==True:
+            beds_filt[i,...] = lowpass_filter_invpad(ds, beds[i,...], cutoff=10e3)
+    
+            beds_filt_up_i = upscale_data(ds, grid, beds_filt[i], grid.bed.values, preds_msk, ds.inv_msk.values)
+            beds_filt_up[i,...] = np.where(beds_filt_up_i > grid.surface-grid.thickness, grid.surface-grid.thickness, beds_filt_up_i)
+
+    ii = np.arange(beds.shape[0])
+    ds_beds = xr.DataArray(beds, coords = {'i' : ii, 'y' : ds.y.values, 'x' : ds.x.values})
+    ds_beds_up = xr.DataArray(beds_up, coords = {'i' : ii, 'y' : grid.y.values, 'x' : grid.x.values})
+    
+    if filt==True:
+        ds_beds_filt = xr.DataArray(beds_filt, coords = {'i' : ii, 'y' : ds.y.values, 'x' : ds.x.values})
+        ds_beds_filt_up = xr.DataArray(beds_filt_up, coords = {'i' : ii, 'y' : grid.y.values, 'x' : grid.x.values})
+
+        return ds_beds, ds_beds_filt, ds_beds_up, ds_beds_filt_up
+    else:
+        return ds_beds, ds_beds_up
 
 def load_data(ds, res_path, geoid=False, filter=False):
     """
@@ -37,8 +157,10 @@ def load_data(ds, res_path, geoid=False, filter=False):
     for entry in os.scandir(res_path):
         if 'result' in entry.name and '._' not in entry.name:
             result = np.load(entry.path, allow_pickle=True).item()
-            densities[i] = result['density'][0]
+            # densities[i] = result['density'][0]
             bed = result['bed_cache']
+            if len(bed.shape)==3:
+                bed = bed[-1,...]
             if filter==True:
                 bed_filt = lowpass_filter_invpad(ds, bed, cutoff=5e3)
                 last_iter[i] = bed_filt.reshape(bed.shape)

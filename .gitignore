@@ -1,6 +1,8 @@
 raw_data/
 results/
 **/results
+**/results_gn
+**/results_new
 ._*
 **/._*
 .ipynb_checkpoints/
@@ -10,3 +12,4 @@ __pycache__/
 .DS_Store/
 **/.DS_Store/
 iceshelves/pineisland/results_new/
+continent_hubs.npy
