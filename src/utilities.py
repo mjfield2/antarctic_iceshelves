@@ -44,6 +44,11 @@ from scipy.spatial import KDTree
 #     else:
 #         return arr.squeeze()
 
+def emplace_data(mask, values, fill=np.nan, dtype=np.float64):
+    grd = np.full_like(mask, fill, dtype=dtype)
+    np.place(grd, mask, values)
+    return grd
+
 def xy_into_grid(gridx, gridy, coords, values, fill=np.nan, quiet=True):
     """
     Place tabular data that is colocated with grid coordinates inside of grid.

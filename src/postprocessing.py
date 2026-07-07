@@ -11,7 +11,7 @@ from scipy.spatial import KDTree
 from skimage.measure import label
 import multiprocessing as mp
 
-from utilities import min_dist_from_mask
+from utilities import min_dist_from_mask, emplace_data
 
 """
 Run this script to load inversions, upscale them, and save upscaled beds.
@@ -20,6 +20,8 @@ Run this script to load inversions, upscale them, and save upscaled beds.
 def get_beds(path):
     beds = []
     losses = []
+    targets = []
+    seed_ids = []
     
     for entry in os.scandir(path):
         if 'result' in entry.name and '._' not in entry.name:
@@ -31,12 +33,14 @@ def get_beds(path):
             else:
                 beds.append(bed)
             losses.append(result['loss_cache'])
+            targets.append(result['target'])
+            seed_ids.append(int(entry.name[:-4].split('_')[-1]))
 
     beds = np.array(beds)
-    return beds, losses
+    targets = np.array(targets)
+    return beds, losses, targets, seed_ids
 
-def upscale_beds(beds, ds, grid, weight_range=10e3, weight_fun='spherical'):
-    inv_msk = grid.mask.values==3
+def upscale_beds(beds, ds, grid, inv_msk, weight_range=10e3, weight_fun='spherical'):
     xx_bm, yy_bm = np.meshgrid(grid.x, grid.y)
     distance = min_dist_from_mask(xx_bm, yy_bm, ~inv_msk)
     var_model = {
@@ -86,6 +90,73 @@ def hub_elevations(ds, bed, mask, min_bed, max_bed, vert_res=1, prior=None, save
     else:
         return hubs
 
+def merged_hubs(i):
+    grid = xr.open_dataset(Path('D:/bedmachine/BedMachineAntarctica-v3.nc'))
+    xx_bm, yy_bm = np.meshgrid(grid.x, grid.y)
+    
+    msks = np.full(xx_bm.shape, False)
+    
+    water_msk = (grid.mask.values==0) | (grid.mask.values==3)
+    
+    bed = grid.bed.values
+    min_bed = -2000
+    max_bed = bed[water_msk].max()
+    vert_res = 1
+    
+    ensembles = []
+    ensemble_dict = {}
+    
+    for i, entry in enumerate(os.scandir(Path('iceshelves'))):
+        if entry.name.startswith('.')==False:
+            with os.scandir(entry.path) as iceshelf_files:
+                for iceshelf_file in iceshelf_files:
+                    if iceshelf_file.name.endswith('.nc'):
+                        dataset_path = iceshelf_file.path
+            ds_i = xr.open_dataarray(Path(entry.path)/'results_gn/ensemble_geoid_500.nc')
+            ensembles.append(ds_i)
+            ensemble_dict[entry.name] = ds_i
+    
+    mask_dict = {}
+    
+    merged_i = np.full(grid.bed.shape, np.nan)
+    
+    for name in ensemble_dict.keys():
+        ds_j = ensemble_dict[name]
+        
+        xx_j, yy_j = np.meshgrid(ds_j.x, ds_j.y)
+        xmin = np.min(xx_j)
+        xmax = np.max(xx_j)
+        ymin = np.min(yy_j)
+        ymax = np.max(yy_j)
+        msk_j = (xx_bm > xmin) & (xx_bm < xmax) & (yy_bm > ymin) & (yy_bm < ymax)
+        msks += msk_j
+    
+        mask_dict[name] = msk_j
+    
+        bed_j = ds_j.sel(i=i).values
+        kn = vd.KNeighbors(k=1)
+        kn.fit((xx_j, yy_j), bed_j)
+        preds_j = kn.predict((xx_bm[msk_j], yy_bm[msk_j]))
+    
+        merged_i = np.where(msk_j, emplace_data(msk_j, preds_j), merged_i)
+    merged_i = np.where((msks==True) & (grid.mask.values==3), merged_i, grid.bed.values)
+    merged_i = merged_i.astype(np.float32)
+
+    hubs_i = hub_elevations(grid, merged_i, water_msk, min_bed, max_bed, vert_res, save_connects=False, quiet=True)
+
+    for name in mask_dict.keys():
+        msk = mask_dict[name]
+        hubs_msk = hubs_i[msk]
+    
+        ni = (np.count_nonzero(msk, axis=1) > 0).sum()
+        nj = (np.count_nonzero(msk, axis=0) > 0).sum()
+    
+        hubs_msk = hubs_msk.reshape((ni,nj))
+    
+        save_path = Path(f'iceshelves/{name}/hubs')
+        save_path.mkdir(parents=True, exist_ok=True)
+        np.save(save_path/f'hub_{i}.npy', hubs_msk)
+
 def get_ensembles(ds, beds, bm_path, filt=False, quiet=True):
     grid = xr.open_dataset(bm_path)
         
@@ -103,6 +174,8 @@ def get_ensembles(ds, beds, bm_path, filt=False, quiet=True):
     preds_msk = kn.predict((xx_bm, yy_bm))
     preds_msk = preds_msk.reshape(xx_bm.shape) > 0.5
 
+    beds_up = upscale_beds(beds, ds, grid, 10e3, 'spherical')
+
     
     beds_up = np.zeros((beds.shape[0], *grid.bed.shape))
     if filt==True:
@@ -110,7 +183,6 @@ def get_ensembles(ds, beds, bm_path, filt=False, quiet=True):
         beds_filt_up = np.zeros((beds.shape[0], *grid.bed.shape))
 
     for i in tqdm(range(beds.shape[0]), disable=quiet):
-        beds_up_i = upscale_data(ds, grid, beds[i], grid.bed.values, preds_msk, ds.inv_msk.values)
         beds_up[i,...] = np.where(beds_up_i > grid.surface-grid.thickness, grid.surface-grid.thickness, beds_up_i)
 
         if filt==True:

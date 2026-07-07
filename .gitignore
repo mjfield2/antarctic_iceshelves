@@ -13,3 +13,5 @@ __pycache__/
 **/.DS_Store/
 iceshelves/pineisland/results_new/
 continent_hubs.npy
+iceshelves/*/hubs
+**/logs

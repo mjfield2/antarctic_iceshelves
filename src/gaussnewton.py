@@ -12,17 +12,17 @@ from gstatsim_custom import *
 from prisms import *
 from utilities import *
 
-def jacobian(xx, yy, ds, bed, density_dict, pred_coords, perturb_scale=1, quiet=True, rng=None):
+def jacobian(xx, yy, ds, bed, density_dict, pred_coords, inv_msk, perturb_scale=1, quiet=True, rng=None):
     if rng is None:
         rng = np.random.default_rng()
 
     res = np.abs(ds.x.values[1]-ds.x.values[0])
 
-    x_vary = xx[ds.inv_msk.values==True]
-    y_vary = yy[ds.inv_msk.values==True]
-    bed_vary = ds.bed.values[ds.inv_msk.values==True]
-    surface_vary = ds.surface.values[ds.inv_msk.values==True]
-    thickness_vary = ds.thickness.values[ds.inv_msk.values==True]
+    x_vary = xx[inv_msk==True]
+    y_vary = yy[inv_msk==True]
+    bed_vary = ds.bed.values[inv_msk==True]
+    surface_vary = ds.surface.values[inv_msk==True]
+    thickness_vary = ds.thickness.values[inv_msk==True]
 
     water_dens = density_dict['water']
     rock_dens = density_dict['rock']
@@ -31,19 +31,26 @@ def jacobian(xx, yy, ds, bed, density_dict, pred_coords, perturb_scale=1, quiet=
 
     pbar = tqdm(range(bed_vary.size), position=0, leave=True, disable=quiet)
     for i in pbar:
-        pos = rng.random()*perturb_scale
-        neg = -1*rng.random()*perturb_scale
-        bed_pos = bed_vary[i]+pos
-        bed_neg = bed_vary[i]+neg
+        # pos = rng.random()*perturb_scale
+        # neg = -1*rng.random()*perturb_scale
+        # bed_pos = bed_vary[i]+pos
+        # bed_neg = bed_vary[i]+neg
         water_top = surface_vary[i]-thickness_vary[i]
-        j = 0
-        while bed_pos > water_top:
-            pos = rng.random()
-            bed_pos = bed_vary[i]+pos
-            if j > 20:
-                bed_pos = water_top - 1e-8
-                break
-            j += 1
+        # j = 0
+        # while bed_pos > water_top:
+        #     pos = rng.random()
+        #     bed_pos = bed_vary[i]+pos
+        #     if j > 20:
+        #         bed_pos = water_top - 1e-8
+        #         bed_neg = bed_pos - perturb_scale
+        #         break
+        #     j += 1
+
+        bed_pos = bed_vary[i]
+        bed_neg = bed_vary[i] - perturb_scale
+
+        if bed_pos > water_top:
+            bed_pos = water_top - 1e-3
         
         prism_pos = [x_vary[i]-res/2, x_vary[i]+res/2, y_vary[i]-res/2, y_vary[i]+res/2, bed_pos, water_top]
         prism_neg = [x_vary[i]-res/2, x_vary[i]+res/2, y_vary[i]-res/2, y_vary[i]+res/2, bed_neg, water_top]
@@ -69,7 +76,7 @@ def gauss_newton(ds, target, pred_coords, density_dict, max_iter=5, alpha=1, per
 
     ice_bottom = ds.surface.values-ds.thickness.values
     bed = ds.bed.values.astype(np.float64)
-    inv_msk = ds.inv_msk.values
+    inv_msk = ds.inv_pad.values
     
     x_vary = xx[inv_msk==True]
     y_vary = yy[inv_msk==True]
@@ -138,7 +145,7 @@ def gauss_newton(ds, target, pred_coords, density_dict, max_iter=5, alpha=1, per
 
 def gn_step(xx, yy, ds, bed, prev_bed, target, residual, density_dict, pred_coords, perturb_scale, lamb, alpha, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev, quiet):
     
-    J = jacobian(xx, yy, ds, prev_bed, density_dict, pred_coords, perturb_scale=perturb_scale, quiet=True)
+    J = jacobian(xx, yy, ds, prev_bed, density_dict, pred_coords, inv_msk, perturb_scale=perturb_scale, quiet=True)
     delta = -1*np.linalg.inv(J.T@J + lamb*np.eye(J.shape[1]))@J.T@residual
 
     if alpha=='search':
@@ -149,12 +156,14 @@ def gn_step(xx, yy, ds, bed, prev_bed, target, residual, density_dict, pred_coor
     
     next_bed = prev_bed + alpha*delta
     next_bed_grid = emplace_bed(next_bed, bed, inv_msk, ice_bottom)
+    next_bed_grid = np.where(ds.inv_msk.values, next_bed_grid, ds.bed.values)
     
     return next_bed, next_bed_grid
 
 def next_step_rmse(alpha, delta, prev_bed, bed, ds, pred_coords, density_dict, target, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev):
     next_bed = prev_bed + alpha*delta
     next_bed_grid = emplace_bed(next_bed, bed, inv_msk, ice_bottom)
+    next_bed_grid = np.where(ds.inv_msk.values, next_bed_grid, ds.bed.values)
 
     g_z_inv_new = forward_model(ds, next_bed_grid, pred_coords, density_dict, msk=inv_msk, ice=False)
     g_z_new = g_z_prev - g_z_inv_prev + g_z_inv_new
@@ -162,7 +171,9 @@ def next_step_rmse(alpha, delta, prev_bed, bed, ds, pred_coords, density_dict, t
     rmse_next = np.sqrt(np.mean(np.square(residual)))
     return rmse_next
 
-def gauss_newton_regularized(ds, prior, target, pred_coords, density_dict, Cm, Wd, max_iter=5, alpha=1, perturb_scale=1, lamb=0, stop=None, quiet=False):
+def gauss_newton_regularized(ds, prior, target, pred_coords, density_dict, Cm, Wd, max_iter=5, alpha=1, perturb_scale=1, lamb=0, stop=None, quiet=False, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
 
     tic = time.time()
 
@@ -170,7 +181,7 @@ def gauss_newton_regularized(ds, prior, target, pred_coords, density_dict, Cm, W
 
     ice_bottom = ds.surface.values-ds.thickness.values
     bed = deepcopy(prior)
-    inv_msk = ds.inv_msk.values
+    inv_msk = ds.inv_pad.values
 
     g_z_prev = forward_model(ds, bed, pred_coords, density_dict)
     g_z_inv_prev = forward_model(ds, bed, pred_coords, density_dict, msk=inv_msk, ice=False)
@@ -196,7 +207,7 @@ def gauss_newton_regularized(ds, prior, target, pred_coords, density_dict, Cm, W
         print(f'# start \t RMSE: {rmse_next:.3f}')
     
     for i in range(max_iter):
-        next_bed, next_bed_grid = rgn_step(xx, yy, ds, bed, prev_bed, target, density_dict, pred_coords, perturb_scale, rw, Wd, Cm, lamb, prior, alpha_i, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev, quiet)
+        next_bed, next_bed_grid = rgn_step(xx, yy, ds, bed, prev_bed, target, density_dict, pred_coords, perturb_scale, rw, Wd, Cm, lamb, prior, alpha_i, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev, quiet, rng=rng)
         g_z_inv_new = forward_model(ds, next_bed_grid, pred_coords, density_dict, msk=inv_msk, ice=False)
         g_z_new = g_z_prev - g_z_inv_prev + g_z_inv_new
         residual = target-g_z_new
@@ -241,9 +252,11 @@ def gauss_newton_regularized(ds, prior, target, pred_coords, density_dict, Cm, W
 
     return bed_cache, rmse_cache
 
-def rgn_step(xx, yy, ds, bed, prev_bed, target, density_dict, pred_coords, perturb_scale, rw, Wd, Cm, lamb, prior, alpha, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev, quiet):
+def rgn_step(xx, yy, ds, bed, prev_bed, target, density_dict, pred_coords, perturb_scale, rw, Wd, Cm, lamb, prior, alpha, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev, quiet, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
     
-    J = jacobian(xx, yy, ds, prev_bed, density_dict, pred_coords, perturb_scale=perturb_scale, quiet=True)
+    J = jacobian(xx, yy, ds, prev_bed, density_dict, pred_coords, inv_msk, perturb_scale=perturb_scale, quiet=True, rng=rng)
     Jw = Wd@J
     H = Jw.T@Jw + lamb*Cm
     I = Jw.T@rw + lamb*Cm@(prev_bed-prior)
@@ -259,12 +272,14 @@ def rgn_step(xx, yy, ds, bed, prev_bed, target, density_dict, pred_coords, pertu
     next_bed = prev_bed + alpha*delta
     
     next_bed_grid = emplace_bed(next_bed, bed, inv_msk, ice_bottom)
+    next_bed_grid = np.where(ds.inv_msk.values, next_bed_grid, ds.bed.values)
 
     return next_bed, next_bed_grid
 
 def next_step_rgn(alpha, delta, prev_bed, bed, ds, pred_coords, density_dict, target, inv_msk, ice_bottom, g_z_prev, g_z_inv_prev, Wd, Cm, prior, lamb):
     next_bed = prev_bed + alpha*delta
     next_bed_grid = emplace_bed(next_bed, bed, inv_msk, ice_bottom)
+    next_bed_grid = np.where(ds.inv_msk.values, next_bed_grid, ds.bed.values)
 
     g_z_inv_new = forward_model(ds, next_bed_grid, pred_coords, density_dict, msk=inv_msk, ice=False)
     g_z_new = g_z_prev - g_z_inv_prev + g_z_inv_new
@@ -342,17 +357,17 @@ def lcurve(lambdas, ds, prior, target, pred_coords, density_dict, Cm, Wd, max_it
         prisms, densities = make_prisms(ds, bed_cache[-1,...], density_dict)
         g_z_new = hm.prism_gravity(pred_coords, prisms, densities, field='g_z')
     
-        inv_msk = ds.inv_msk.values
+        inv_msk = ds.inv_pad.values
     
         residual = target - g_z_new
         data_fits.append(np.sqrt(np.sum(np.square(np.diag(Wd)*residual))))
         model_fits.append(np.sqrt(np.sum(np.square(Cm@(bed_cache[-1,...][inv_msk]-prior[inv_msk])))))
 
-    min_model_fit = np.min(np.log(model_fits))
-    min_data_fit = np.min(np.log(data_fits))
+    min_model_fit = np.nanmin(np.log(model_fits))
+    min_data_fit = np.nanmin(np.log(data_fits))
     dists = np.sqrt((np.log(data_fits)-min_data_fit)**2+(np.log(model_fits)-min_model_fit)**2)
-
-    lopt = lambdas[np.argmin(dists)]
+    
+    lopt = lambdas[np.nanargmin(dists)]
 
     return lopt, data_fits, model_fits, dists
     
